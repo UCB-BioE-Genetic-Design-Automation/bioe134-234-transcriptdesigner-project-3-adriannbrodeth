@@ -1,5 +1,5 @@
 import random
-import math  # Added for log-sum calculation
+import csv
 from genedesign.rbs_chooser import RBSChooser
 from genedesign.models.transcript import Transcript
 from genedesign.checkers.codon_checker import CodonChecker
@@ -9,138 +9,115 @@ from genedesign.checkers.internal_promoter_checker import PromoterChecker
 
 class TranscriptDesigner:
     """
-    Reverse translates a protein sequence into a DNA sequence and selects an RBS.
-    Validated against multiple biological constraints with robust error handling.
+    Reverse translates a protein sequence into a DNA sequence using weighted random 
+    selection from a codon usage table. It iteratively validates the design against 
+    hairpin, promoter, and forbidden sequence constraints.
     """
 
-    # Increased attempts to give the stochastic sampler more chances to succeed
-    MAX_ATTEMPTS = 1000
-
     def __init__(self):
-        self.codon_table = {}
-        self.rbsChooser = RBSChooser()
-        self.codonChecker = CodonChecker()
-        self.forbiddenChecker = ForbiddenSequenceChecker()
-        self.promoterChecker = PromoterChecker()
+        self.rbs_chooser = None
+        self.promoter_checker = PromoterChecker()
+        self.forbidden_checker = ForbiddenSequenceChecker()
+        self.codon_checker = CodonChecker()
+        self.amino_acid_to_codon_map = {}
 
     def initiate(self) -> None:
-        self.rbsChooser.initiate()
-        self.codonChecker.initiate()
-        self.forbiddenChecker.initiate()
-        self.promoterChecker.initiate()
-        self.codon_table = self._default_codon_table()
-
-    def run(self, peptide: str, ignores: set) -> Transcript:
         """
-        Translates peptide to DNA, ensuring it passes all checker constraints.
+        Initializes the checkers and parses the codon usage data.
         """
-        for attempt in range(1, self.MAX_ATTEMPTS + 1):
-            codons = self._sample_codons(peptide)
-            cds = ''.join(codons)
+        self.rbs_chooser = RBSChooser()
+        self.rbs_chooser.initiate()
+        
+        self.promoter_checker.initiate()
+        self.forbidden_checker.initiate()
+        self.codon_checker.initiate()
 
-            # Pass both the string (structural) and list (codon usage)
-            failures = self._check_sequence(cds, codons)
-            
-            if not failures:
-                selected_rbs = self.rbsChooser.run(cds, ignores)
-                if selected_rbs:
-                    return Transcript(selected_rbs, peptide, codons)
+        # Load codon usage data for the random translation weights
+        # Note: Ensure this path matches your directory structure.
+        codon_usage_file = 'genedesign/data/codon_usage.txt'
+        
+        try:
+            with open(codon_usage_file, 'r') as f:
+                for line in f:
+                    parts = line.split()
+                    # Skip header lines or source tags (e.g., )
+                    if len(parts) >= 3:
+                        codon = parts[0].strip()
+                        aa = parts[1].strip()
+                        try:
+                            freq = float(parts[2].strip())
+                            if aa not in self.amino_acid_to_codon_map:
+                                self.amino_acid_to_codon_map[aa] = []
+                            self.amino_acid_to_codon_map[aa].append((codon, freq))
+                        except ValueError:
+                            # Skip lines where frequency is not a valid float
+                            continue
+        except FileNotFoundError:
+            print(f"Error: Could not find {codon_usage_file}. Check your file path.")
 
-        raise RuntimeError(f"Failed to find valid sequence after {self.MAX_ATTEMPTS} attempts.")
-
-    def _sample_codons(self, peptide: str) -> list[str]:
+    def _generate_candidate_codons(self, peptide: str) -> list:
+        """
+        Generates a candidate list of codons based on usage frequencies.
+        """
         codons = []
         for aa in peptide:
-            options = self.codon_table.get(aa)
+            options = self.amino_acid_to_codon_map.get(aa)
             if not options:
-                raise ValueError(f"Unknown amino acid: '{aa}'")
+                continue
             
-            c_list = [opt[0] for opt in options]
-            w_list = [opt[1] for opt in options]
-            codons.append(random.choices(c_list, weights=w_list, k=1)[0])
-
-        stop_options = self.codon_table.get('*')
-        s_list = [opt[0] for opt in stop_options]
-        sw_list = [opt[1] for opt in stop_options]
-        codons.append(random.choices(s_list, weights=sw_list, k=1)[0])
+            # Perform weighted random selection based on natural frequencies
+            choices = [opt[0] for opt in options]
+            weights = [opt[1] for opt in options]
+            codons.append(random.choices(choices, weights=weights)[0])
+        
+        codons.append("TAA")  # Default stop codon
         return codons
 
-    def _check_sequence(self, cds: str, codons: list[str]) -> list[str]:
+    def run(self, peptide: str, ignores: set, max_attempts: int = 500) -> Transcript:
         """
-        Runs all checkers. Includes a manual CAI calculation to prevent 
-        floating-point underflow on long protein sequences.
+        Iteratively generates and validates transcripts until all criteria are met.
         """
-        failures = []
-        
-        # 1. Structural Checkers (Expect DNA String)
-        forbidden_ok, forbidden_site = self.forbiddenChecker.run(cds)
-        if not forbidden_ok:
-            failures.append(f"Forbidden: {forbidden_site}")
+        for attempt in range(max_attempts):
+            # 1. Generate candidate sequence
+            codons = self._generate_candidate_codons(peptide)
+            cds_seq = "".join(codons)
+            
+            # 2. Check Codon Quality (CAI, Diversity, Rare Codons)
+            # This uses the correctly named 'codon_checker' attribute
+            c_pass, div, rare, cai = self.codon_checker.run(codons)
+            if not c_pass:
+                continue
+                
+            # 3. Check Forbidden Sequences (Restriction sites, poly-A, etc.)
+            f_pass, site = self.forbidden_checker.run(cds_seq)
+            if not f_pass:
+                continue
+                
+            # 4. Check Internal Promoters
+            p_pass, promo = self.promoter_checker.run(cds_seq) 
+            if not p_pass:
+                continue
+                
+            # 5. Check for Bad Hairpins
+            h_pass, hairpin_str = hairpin_checker(cds_seq) 
+            if not h_pass:
+                continue
+            
+            # 6. Success: Select RBS and Return
+            selected_rbs = self.rbs_chooser.run(cds_seq, ignores)
+            print(f"Design succeeded on attempt {attempt + 1} with CAI: {cai:.3f}")
+            return Transcript(selected_rbs, peptide, codons)
 
-        promoter_ok, promoter_seq = self.promoterChecker.run(cds)
-        if not promoter_ok:
-            failures.append(f"Promoter: {promoter_seq}")
+        raise Exception(f"Failed to find a valid sequence after {max_attempts} attempts.")
 
-        hairpin_ok, hairpin_seq = hairpin_checker(cds)
-        if not hairpin_ok:
-            failures.append(f"Hairpin: {hairpin_seq}")
-
-        # 2. Manual Codon Usage Logic (Bypasses underflow bug in CodonChecker.run)
-        diversity_threshold = 0.5
-        rare_codon_threshold = 0.1
-        rare_codon_limit = 3
-        cai_threshold = 0.2
-
-        # Diversity: Fraction of unique codons used
-        unique_codons = set(codons)
-        diversity = len(unique_codons) / len(codons)
-
-        # Rare Codons: Count codons with frequency < 0.1
-        rare_count = 0
-        for c in codons:
-            freq = self.codonChecker.codon_frequencies.get(c, 0.0)
-            if freq < rare_codon_threshold:
-                rare_count += 1
-
-        # CAI: Geometric mean calculated in log-space to prevent underflow to 0.0
-        # Formula: exp( (sum of log(frequencies)) / n )
-        try:
-            log_sum = sum(math.log(self.codonChecker.codon_frequencies.get(c, 0.01)) for c in codons)
-            safe_cai = math.exp(log_sum / len(codons))
-        except (ValueError, ZeroDivisionError):
-            safe_cai = 0.0
-
-        if diversity < diversity_threshold or rare_count > rare_codon_limit or safe_cai < cai_threshold:
-            failures.append(f"Codon Usage: Div={diversity:.2f}, Rare={rare_count}, CAI={safe_cai:.2f}")
-        
-        return failures
-
-    @staticmethod
-    def _default_codon_table() -> dict:
-        return {
-            'A': [('GCT', 0.18), ('GCC', 0.26), ('GCA', 0.23), ('GCG', 0.33)],
-            'R': [('CGT', 0.36), ('CGC', 0.40), ('CGA', 0.07), ('CGG', 0.11), ('AGA', 0.04), ('AGG', 0.02)],
-            'N': [('AAT', 0.45), ('AAC', 0.55)], 'D': [('GAT', 0.63), ('GAC', 0.37)],
-            'C': [('TGT', 0.45), ('TGC', 0.55)], 'Q': [('CAA', 0.34), ('CAG', 0.66)],
-            'E': [('GAA', 0.68), ('GAG', 0.32)], 'G': [('GGT', 0.35), ('GGC', 0.40), ('GGA', 0.11), ('GGG', 0.14)],
-            'H': [('CAT', 0.57), ('CAC', 0.43)], 'I': [('ATT', 0.49), ('ATC', 0.39), ('ATA', 0.11)],
-            'L': [('TTA', 0.14), ('TTG', 0.13), ('CTT', 0.12), ('CTC', 0.10), ('CTA', 0.04), ('CTG', 0.47)],
-            'K': [('AAA', 0.74), ('AAG', 0.26)], 'M': [('ATG', 1.00)], 'F': [('TTT', 0.58), ('TTC', 0.42)],
-            'P': [('CCT', 0.18), ('CCC', 0.13), ('CCA', 0.20), ('CCG', 0.49)],
-            'S': [('TCT', 0.17), ('TCC', 0.15), ('TCA', 0.14), ('TCG', 0.14), ('AGT', 0.16), ('AGC', 0.25)],
-            'T': [('ACT', 0.19), ('ACC', 0.40), ('ACA', 0.17), ('ACG', 0.25)],
-            'W': [('TGG', 1.00)], 'Y': [('TAT', 0.59), ('TAC', 0.41)],
-            'V': [('GTT', 0.28), ('GTC', 0.20), ('GTA', 0.17), ('GTG', 0.35)],
-            '*': [('TAA', 0.61), ('TAG', 0.09), ('TGA', 0.30)],
-        }
-
-# if __name__ == "__main__":
-#    designer = TranscriptDesigner()
-#    designer.initiate()
-#    test_peptide = "MYPFIRTARMTV"
-#    
-#    try:
-#        transcript = designer.run(test_peptide, ignores=set())
-#        print(f"Success! DNA: {''.join(transcript.codons)}")
-#    except Exception as e:
-#        print(f"Test failed with error: {e}")
+if __name__ == "__main__":
+    designer = TranscriptDesigner()
+    designer.initiate()
+    
+    # Example usage
+    test_peptide = "MYPFIRTARMTV"
+    try:
+        result = designer.run(test_peptide, set())
+        print(f"Final DNA: {''.join(result.codons)}")
+    except Exception as e:
+        print(e)
