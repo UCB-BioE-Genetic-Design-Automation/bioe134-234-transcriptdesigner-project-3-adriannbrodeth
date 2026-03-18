@@ -52,7 +52,7 @@ def benchmark_proteome(fasta_file):
     successful_results = []
     error_results = []
 
-    for gene, protein in list(proteome.items())[:10]:
+    for gene, protein in proteome.items():
         try:
             print(f"Processing gene: {gene} with protein sequence: {protein[:30]}...")
             ignores = set()
