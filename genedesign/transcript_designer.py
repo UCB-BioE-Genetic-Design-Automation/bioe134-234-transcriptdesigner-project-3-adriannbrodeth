@@ -53,6 +53,16 @@ class TranscriptDesigner:
                         self.aa_to_codons[aa].append((codon, freq))
 
     def run(self, peptide: str, ignores: set) -> Transcript:
+        # --- INPUT SANITIZATION ---
+        peptide = peptide.upper()
+        # Remove a trailing stop character if it exists so we don't double up
+        if peptide.endswith("*"):
+            peptide = peptide[:-1]
+        # Guarantee a start Methionine
+        if not peptide.startswith("M"):
+            peptide = "M" + peptide
+        # --------------------------
+
         ignores.update(self.forbidden_checker.forbidden)
         selectedRBS = self.rbsChooser.run("ATG", ignores)
         utr = selectedRBS.utr.upper()
@@ -186,6 +196,7 @@ class TranscriptDesigner:
             final_codons.append(fallback)
             usage[fallback] += 1
 
+        # The loop explicitly checks `pos == n - 1: test_dna += "TAA"`, and here we append it
         final_codons.append("TAA")
         
         return Transcript(selectedRBS, peptide, final_codons)
