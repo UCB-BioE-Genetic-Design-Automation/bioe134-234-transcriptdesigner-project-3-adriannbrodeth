@@ -173,19 +173,19 @@ class TranscriptDesigner:
         final_codons = [s[0] for s in stack if s[0]]
 
         # FAILSAFE: If the algorithm hit the max_step limit, pad the rest of the sequence 
-        while len(final_codons) < n:
-            aa = peptide[len(final_codons)]
-            opts = self.aa_to_codons.get(aa)
+        #while len(final_codons) < n:
+        #    aa = peptide[len(final_codons)]
+        #    opts = self.aa_to_codons.get(aa)
             
-            if not opts:
-                fallback = "ATG" 
-            else:
+        #    if not opts:
+        #        fallback = "ATG" 
+        #    else:
                 # Stochastic failsafe: Just pick based on pure frequency
-                weights = [c[1] for c in opts]
-                fallback = random.choices(opts, weights=weights, k=1)[0][0]
+        #        weights = [c[1] for c in opts]
+        #        fallback = random.choices(opts, weights=weights, k=1)[0][0]
                 
-            final_codons.append(fallback)
-            usage[fallback] += 1
+        #    final_codons.append(fallback)
+        #    usage[fallback] += 1
 
         # Append stop codon
         final_codons.append("TAA")
