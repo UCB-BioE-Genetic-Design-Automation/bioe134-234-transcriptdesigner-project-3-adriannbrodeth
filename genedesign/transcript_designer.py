@@ -12,7 +12,7 @@ class TranscriptDesigner:
     Validated against multiple biological constraints with robust error handling.
     """
 
-    MAX_ATTEMPTS = 10000
+    MAX_ATTEMPTS = 100
 
     def __init__(self):
         self.codon_table = {}
