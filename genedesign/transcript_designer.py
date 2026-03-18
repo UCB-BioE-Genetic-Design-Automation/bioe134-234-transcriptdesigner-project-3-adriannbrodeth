@@ -25,7 +25,7 @@ class TranscriptDesigner:
     Translates a protein sequence into a DNA sequence that satisfies multiple design constraints:
     low hairpin count, absence of forbidden sequences, and absence of internal sigma70 promoters.
     
-    Uses a phase-aligned heuristic backtracking algorithm to prevent timeout failures.
+    Uses a stochastic, phase-aligned heuristic backtracking algorithm.
     """
     def __init__(self):
         self.aa_to_codons = {}
@@ -66,13 +66,9 @@ class TranscriptDesigner:
                     if freq >= 0.10:
                         self.aa_to_codons[aa].append((codon, freq))
 
-        # Sort the synonymous codons by frequency (descending) so we try the best ones first
-        for aa in self.aa_to_codons:
-            self.aa_to_codons[aa].sort(key=lambda x: x[1], reverse=True)
-
     def run(self, peptide: str, ignores: set) -> Transcript:
         """
-        Iteratively builds the transcript codon-by-codon using depth-first search (backtracking).
+        Iteratively builds the transcript codon-by-codon using randomized depth-first search.
         """
         # Ensure forbidden sites are completely ignored by the RBS Chooser
         ignores.update(self.forbidden_checker.forbidden)
@@ -87,7 +83,7 @@ class TranscriptDesigner:
 
         pos = 0
         total_steps = 0
-        max_steps = 1000 
+        max_steps = 500000 
 
         # 2. Backtracking search
         while pos < n and total_steps < max_steps:
@@ -97,10 +93,20 @@ class TranscriptDesigner:
             # If we are visiting this position for the first time, populate the codon options
             if len(stack) <= pos:
                 opts = list(self.aa_to_codons.get(aa, [("ATG", 1.0)]))
-                # Sort options by how few times we've used them (to maintain diversity),
-                # then by their natural frequency
-                sorted_opts = sorted(opts, key=lambda x: (usage[x[0]], -x[1]))
-                stack.append([None, [o[0] for o in sorted_opts]])
+                
+                # --- NEW: STOCHASTIC WEIGHTED SHUFFLE ---
+                # We randomly shuffle the codons, but weight the probability so that 
+                # high-frequency and low-usage codons are usually placed first.
+                pool = list(opts)
+                shuffled_opts = []
+                while pool:
+                    # Weight = (Natural Frequency) / (Times Used + 1)
+                    weights = [(c[1] / (usage[c[0]] + 1)) for c in pool]
+                    chosen = random.choices(pool, weights=weights, k=1)[0]
+                    shuffled_opts.append(chosen)
+                    pool.remove(chosen)
+                
+                stack.append([None, [c[0] for c in shuffled_opts]])
 
             curr_level = stack[pos]
             found_valid = False
@@ -111,7 +117,7 @@ class TranscriptDesigner:
 
                 prefix = "".join([s[0] for s in stack[:pos] if s[0]])
                 
-                # Critically, prepend the UTR to catch junction errors
+                # Prepend the UTR to catch junction errors
                 test_dna = utr + prefix + codon
 
                 # If this is the final amino acid, append the stop codon to check the end context
@@ -119,20 +125,16 @@ class TranscriptDesigner:
                     test_dna += "TAA"
 
                 # CHECK 1: FORBIDDEN SEQUENCES
-                # Only check the tail where the new codon was added
                 tail_forbidden = test_dna[-20:]
                 if not self.forbidden_checker.run(tail_forbidden)[0]: 
                     continue
                 
                 # CHECK 2: PROMOTERS
-                # Only check the tail (40bp is enough to cover the 29bp promoter window)
                 tail_promoter = test_dna[-40:]
                 if len(test_dna) >= 29 and not self.promoter_checker.run(tail_promoter)[0]: 
                     continue
                 
                 # CHECK 3: HAIRPINS (Phase-Aligned Early Detection)
-                # We calculate the exact 50bp chunks the benchmark will eventually use. 
-                # Checking them as they grow prevents us from getting stuck deep in a bad path.
                 bad_hairpin = False
                 start_idx = max(0, ((len(test_dna) - 50) // 25) * 25)
                 for i in range(start_idx, len(test_dna), 25):
@@ -171,7 +173,6 @@ class TranscriptDesigner:
         final_codons = [s[0] for s in stack if s[0]]
 
         # FAILSAFE: If the algorithm hit the max_step limit, pad the rest of the sequence 
-        # so it doesn't crash the benchmark, even if it violates a constraint.
         while len(final_codons) < n:
             aa = peptide[len(final_codons)]
             opts = self.aa_to_codons.get(aa)
@@ -179,8 +180,9 @@ class TranscriptDesigner:
             if not opts:
                 fallback = "ATG" 
             else:
-                sorted_opts = sorted(opts, key=lambda x: (usage[x[0]], -x[1]))
-                fallback = sorted_opts[0][0]
+                # Stochastic failsafe: Just pick based on pure frequency
+                weights = [c[1] for c in opts]
+                fallback = random.choices(opts, weights=weights, k=1)[0][0]
                 
             final_codons.append(fallback)
             usage[fallback] += 1
@@ -191,12 +193,16 @@ class TranscriptDesigner:
         return Transcript(selectedRBS, peptide, final_codons)
 
 if __name__ == "__main__":
-    # Example usage for quick testing
     designer = TranscriptDesigner()
     designer.initiate()
     test_peptide = "MYPFIRTARMTV"
+    
+    # Because it is stochastic, running it twice should give different valid DNA sequences
     try:
-        result = designer.run(test_peptide, set())
-        print(f"Final DNA: {''.join(result.codons)}")
+        res1 = designer.run(test_peptide, set())
+        print(f"Run 1 DNA: {''.join(res1.codons)}")
+        
+        res2 = designer.run(test_peptide, set())
+        print(f"Run 2 DNA: {''.join(res2.codons)}")
     except Exception as e:
         print(f"Error: {e}")
