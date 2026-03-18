@@ -87,7 +87,7 @@ class TranscriptDesigner:
 
         pos = 0
         total_steps = 0
-        max_steps = 500000 
+        max_steps = 1000 
 
         # 2. Backtracking search
         while pos < n and total_steps < max_steps:
