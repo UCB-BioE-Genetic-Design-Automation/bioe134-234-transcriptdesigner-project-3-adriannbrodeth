@@ -3,7 +3,7 @@ import traceback
 import csv
 import time
 from statistics import mean
-from genedesign.seq_utils.translate import Translate
+from genedesign.seq_utils.Translate import Translate
 from genedesign.transcript_designer import TranscriptDesigner
 from genedesign.checkers.forbidden_sequence_checker import ForbiddenSequenceChecker
 from genedesign.checkers.internal_promoter_checker import PromoterChecker
