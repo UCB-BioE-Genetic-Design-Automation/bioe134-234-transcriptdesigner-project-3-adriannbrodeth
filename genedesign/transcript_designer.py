@@ -63,7 +63,7 @@ class TranscriptDesigner:
 
         pos = 0
         total_steps = 0
-        max_steps = 500000 
+        max_steps = 50000 
 
         while pos < n and total_steps < max_steps:
             total_steps += 1
