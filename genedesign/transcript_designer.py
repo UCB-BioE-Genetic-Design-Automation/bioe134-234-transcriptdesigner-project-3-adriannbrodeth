@@ -1,4 +1,5 @@
 import random
+import math  # Added for log-sum calculation
 from genedesign.rbs_chooser import RBSChooser
 from genedesign.models.transcript import Transcript
 from genedesign.checkers.codon_checker import CodonChecker
@@ -12,7 +13,8 @@ class TranscriptDesigner:
     Validated against multiple biological constraints with robust error handling.
     """
 
-    MAX_ATTEMPTS = 100
+    # Increased attempts to give the stochastic sampler more chances to succeed
+    MAX_ATTEMPTS = 1000
 
     def __init__(self):
         self.codon_table = {}
@@ -36,12 +38,11 @@ class TranscriptDesigner:
             codons = self._sample_codons(peptide)
             cds = ''.join(codons)
 
-            # FIX: Pass both the string (for structural checks) and list (for codon checks)
+            # Pass both the string (structural) and list (codon usage)
             failures = self._check_sequence(cds, codons)
             
             if not failures:
                 selected_rbs = self.rbsChooser.run(cds, ignores)
-                # Ensure the RBS chooser actually returned a sequence
                 if selected_rbs:
                     return Transcript(selected_rbs, peptide, codons)
 
@@ -66,7 +67,8 @@ class TranscriptDesigner:
 
     def _check_sequence(self, cds: str, codons: list[str]) -> list[str]:
         """
-        Runs all checkers, ensuring the correct data format is sent to each.
+        Runs all checkers. Includes a manual CAI calculation to prevent 
+        floating-point underflow on long protein sequences.
         """
         failures = []
         
@@ -83,11 +85,33 @@ class TranscriptDesigner:
         if not hairpin_ok:
             failures.append(f"Hairpin: {hairpin_seq}")
 
-        # 2. Codon Usage Checker (Expects List of Codons)
-        codon_res = self.codonChecker.run(codons)
-        if not codon_res[0]:
-            # codon_res[1] is diversity, [2] is rare count, [3] is CAI
-            failures.append(f"Codon: Diversity={codon_res[1]:.2f}, RareCount={codon_res[2]}, CAI={codon_res[3]:.2f}")
+        # 2. Manual Codon Usage Logic (Bypasses underflow bug in CodonChecker.run)
+        diversity_threshold = 0.5
+        rare_codon_threshold = 0.1
+        rare_codon_limit = 3
+        cai_threshold = 0.2
+
+        # Diversity: Fraction of unique codons used
+        unique_codons = set(codons)
+        diversity = len(unique_codons) / len(codons)
+
+        # Rare Codons: Count codons with frequency < 0.1
+        rare_count = 0
+        for c in codons:
+            freq = self.codonChecker.codon_frequencies.get(c, 0.0)
+            if freq < rare_codon_threshold:
+                rare_count += 1
+
+        # CAI: Geometric mean calculated in log-space to prevent underflow to 0.0
+        # Formula: exp( (sum of log(frequencies)) / n )
+        try:
+            log_sum = sum(math.log(self.codonChecker.codon_frequencies.get(c, 0.01)) for c in codons)
+            safe_cai = math.exp(log_sum / len(codons))
+        except (ValueError, ZeroDivisionError):
+            safe_cai = 0.0
+
+        if diversity < diversity_threshold or rare_count > rare_codon_limit or safe_cai < cai_threshold:
+            failures.append(f"Codon Usage: Div={diversity:.2f}, Rare={rare_count}, CAI={safe_cai:.2f}")
         
         return failures
 
