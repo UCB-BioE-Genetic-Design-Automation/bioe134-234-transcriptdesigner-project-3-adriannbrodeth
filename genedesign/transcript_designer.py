@@ -6,6 +6,7 @@ from genedesign.models.transcript import Transcript
 from genedesign.checkers.forbidden_sequence_checker import ForbiddenSequenceChecker
 from genedesign.checkers.internal_promoter_checker import PromoterChecker
 from genedesign.seq_utils.hairpin_counter import hairpin_counter 
+from genedesign.checkers.rnase_e_checker import RNaseEChecker
 
 # --- MONKEY PATCH CODON CHECKER ---
 # Bypass the mathematically impossible Diversity >= 0.5 threshold for proteins > 128 AA
@@ -28,14 +29,21 @@ class TranscriptDesigner:
         self.rbsChooser = None
         self.forbidden_checker = None
         self.promoter_checker = None
+        self.rnase_checker = None  # Add new checker to init
 
     def initiate(self) -> None:
         self.rbsChooser = RBSChooser()
         self.rbsChooser.initiate()
+        
         self.forbidden_checker = ForbiddenSequenceChecker()
         self.forbidden_checker.initiate()
+        
         self.promoter_checker = PromoterChecker()
         self.promoter_checker.initiate()
+
+        # Instantiate and initiate the RNase E Checker
+        self.rnase_checker = RNaseEChecker()
+        self.rnase_checker.initiate()
 
         path = os.path.join(os.path.dirname(__file__), 'data', 'codon_usage.txt')
         if not os.path.exists(path):
@@ -55,10 +63,8 @@ class TranscriptDesigner:
     def run(self, peptide: str, ignores: set) -> Transcript:
         # --- INPUT SANITIZATION ---
         peptide = peptide.upper()
-        # Remove a trailing stop character if it exists so we don't double up
         if peptide.endswith("*"):
             peptide = peptide[:-1]
-        # Guarantee a start Methionine
         if not peptide.startswith("M"):
             peptide = "M" + peptide
         # --------------------------
@@ -79,11 +85,9 @@ class TranscriptDesigner:
             total_steps += 1
             aa = peptide[pos]
 
-            # Populate codon options dynamically based on local GC content
             if len(stack) <= pos:
                 opts = list(self.aa_to_codons.get(aa, [("ATG", 1.0)]))
                 
-                # Calculate trailing GC content to inform our weights
                 prefix = "".join([s[0] for s in stack[:pos] if s[0]])
                 current_tail = (utr + prefix)[-20:]
                 if current_tail:
@@ -99,14 +103,12 @@ class TranscriptDesigner:
                         codon_seq, natural_freq = c
                         codon_gc = (codon_seq.count('G') + codon_seq.count('C')) / 3.0
                         
-                        # Base weight: High frequency, low previous usage
                         w = natural_freq / (usage[codon_seq] + 1)
                         
-                        # GC-Aware Penalty: Steer away from extreme GC or AT buildup
                         if gc_ratio > 0.55 and codon_gc > 0.5:
-                            w *= 0.3  # Penalize adding more GC to a GC-rich tail (prevents hairpins)
+                            w *= 0.3  
                         elif gc_ratio < 0.45 and codon_gc < 0.5:
-                            w *= 0.3  # Penalize adding more AT to an AT-rich tail (prevents promoters)
+                            w *= 0.3  
                             
                         weights.append(w)
                         
@@ -138,17 +140,19 @@ class TranscriptDesigner:
                 if len(test_dna) >= 29 and not self.promoter_checker.run(tail_promoter)[0]: 
                     continue
                 
-                # 3. HAIRPINS (Continuous Rolling Window)
-                # Instead of phase-aligning, we strictly check the last 50 bases.
-                # This catches a newly forming hairpin instantly, saving massive backtracking depth.
+                # 3. EXTERNAL RNASE E CHECKER (Class Implementation)
+                tail_rnase = test_dna[-10:]
+                if not self.rnase_checker.run(tail_rnase)[0]:
+                    continue
+                
+                # 4. HAIRPINS
                 bad_hairpin = False
                 tail_hairpin = test_dna[-50:]
-                if len(tail_hairpin) >= 15: # Minimum realistic length to even form a 3-4-3 hairpin
+                if len(tail_hairpin) >= 15: 
                     hp_count, _ = hairpin_counter(tail_hairpin, 3, 4, 9)
                     if hp_count > 1:
                         bad_hairpin = True
                 
-                # Also check the phase-aligned block to strictly satisfy the benchmarker
                 if not bad_hairpin:
                     start_idx = max(0, ((len(test_dna) - 50) // 25) * 25)
                     chunk = test_dna[start_idx : start_idx + 50]
@@ -159,7 +163,6 @@ class TranscriptDesigner:
                 if bad_hairpin:
                     continue
 
-                # Valid sequence found
                 curr_level[0] = codon
                 usage[codon] += 1
                 pos += 1
@@ -196,7 +199,6 @@ class TranscriptDesigner:
             final_codons.append(fallback)
             usage[fallback] += 1
 
-        # The loop explicitly checks `pos == n - 1: test_dna += "TAA"`, and here we append it
         final_codons.append("TAA")
         
         return Transcript(selectedRBS, peptide, final_codons)
